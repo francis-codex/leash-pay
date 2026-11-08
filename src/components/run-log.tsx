@@ -13,10 +13,10 @@ function summarize(name: string, v: unknown): string {
   const o = v as Record<string, unknown>;
   if (name === "pay" || name === "request_approval") {
     if ("to" in o) return `$${Number(o.amount_usd).toFixed(2)} → ${o.to}`;
-    if (o.status === "paid") return "paid";
-    if (o.status === "refused_by_wallet") return `${o.error}${o.detail ? ` · ${o.detail}` : ""}`;
-    if (o.status === "waiting_for_owner") return `proposal #${o.proposal} waiting`;
-    if (o.status === "failed") return `failed · ${o.error}`;
+    if (o.status === "paid") return `paid · paypal payout ${o.paypal_payout_batch_id}`;
+    if (o.status === "refused_by_policy") return `${o.detail ?? o.reason}`;
+    if (o.status === "waiting_for_owner") return `paypal order ${o.paypal_order_id} waiting for the owner`;
+    if (o.status === "failed") return `failed · ${o.reason}`;
   }
   if (name === "get_balance" && "remaining_today_usd" in o) return `$${o.remaining_today_usd} left today, $${o.max_per_payment_usd} max per payment`;
   if (name === "list_vendors" && Array.isArray(o.vendors)) return `${o.vendors.length} vendors`;
@@ -61,7 +61,7 @@ export function RunLog({ steps, running }: { steps: Step[]; running?: boolean })
                     <>
                       {" · "}
                       <a href={tx} target="_blank" rel="noreferrer" className="underline underline-offset-2">
-                        solscan
+                        paypal
                       </a>
                     </>
                   )}

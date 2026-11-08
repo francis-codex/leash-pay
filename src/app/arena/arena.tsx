@@ -168,11 +168,17 @@ export function Arena({ presets, vendors }: { presets: Preset[]; vendors: Vendor
             <OutcomeTag outcome={result.outcome} className="text-[22px] font-semibold tracking-[-0.01em]" />
             <p className="mt-2 text-[15px] text-slate">{OUTCOME[result.outcome].note}</p>
             <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-[14px]">
-              {result.txs.map((t) => (
-                <a key={t.label} href={t.explorer} target="_blank" rel="noreferrer" className="text-blue-ink underline underline-offset-4">
-                  {t.error ? `refusal on solscan` : `${t.label} on solscan`}
-                </a>
-              ))}
+              {result.txs.map((t) =>
+                t.explorer ? (
+                  <Link key={t.label} href={t.explorer} className="text-blue-ink underline underline-offset-4">
+                    {t.label}, open the approval
+                  </Link>
+                ) : (
+                  <span key={t.label} className={t.error ? "text-blue-ink" : "text-ink"}>
+                    {t.label}
+                  </span>
+                ),
+              )}
               <Link href={`/attempt/${result.id}`} className="text-slate underline underline-offset-4 hover:text-ink">
                 permalink
               </Link>
