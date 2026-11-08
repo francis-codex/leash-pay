@@ -1,6 +1,7 @@
 import { budget } from "@/lib/policy";
 import { paypalMode } from "@/lib/paypal";
 import { MAX_APPROVAL_USD, VENDORS } from "@/lib/config";
+import { isPaused } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "rules · leash" };
@@ -23,7 +24,7 @@ function Row({ k, v, href }: { k: string; v: string; href?: string }) {
 }
 
 export default async function Rules() {
-  const b = await budget();
+  const [b, paused] = await Promise.all([budget(), isPaused()]);
   const usd = (n: number) => `$${n.toFixed(2)}`;
   return (
     <div className="max-w-[760px] pt-14 pb-10 sm:pt-20">
@@ -54,6 +55,7 @@ export default async function Rules() {
         <h2 className="text-[17px] font-semibold">right now</h2>
         <dl className="mt-4 border-t border-line">
           <Row k="paypal" v={paypalMode()} />
+          <Row k="kill switch" v={paused ? "paused: every payment refused" : "running"} />
           <Row k="spent today" v={usd(b.spent_today_usd)} />
           <Row k="left today" v={usd(b.remaining_today_usd)} />
           {VENDORS.map((v) => (
@@ -65,7 +67,9 @@ export default async function Rules() {
       <section className="mt-12">
         <h2 className="text-[17px] font-semibold">honest limits</h2>
         <p className="mt-4 text-[15px] leading-relaxed text-slate">
-          the vendor list, per-payment limit and daily cap are enforced by our server, not by paypal. if you can get money
+          the vendor list, per-payment limit, daily cap and the owner&apos;s kill switch are enforced by our server, not by
+          paypal. every payment carries the agent&apos;s one-sentence reason; its sha256 is written into the paypal payout
+          note or order description, so paypal&apos;s copy can be checked against the reason shown here. if you can get money
           to a paypal account that isn&apos;t listed, or past the limits, without the owner approving it on paypal, you
           broke it. tell us.
         </p>

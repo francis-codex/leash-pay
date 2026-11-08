@@ -36,8 +36,12 @@ export function RunLog({ steps, running }: { steps: Step[]; running?: boolean })
           );
         }
         const refused =
-          s.output && typeof s.output === "object" && (s.output as { status?: string }).status === "refused_by_wallet";
+          s.output && typeof s.output === "object" && (s.output as { status?: string }).status === "refused_by_policy";
         const tx = s.output && typeof s.output === "object" ? (s.output as { tx?: string }).tx : undefined;
+        const reason =
+          s.input && typeof s.input === "object" ? (s.input as { reason?: string }).reason : undefined;
+        const hash =
+          s.output && typeof s.output === "object" ? (s.output as { reason_sha256?: string }).reason_sha256 : undefined;
         const input = summarize(s.name, s.input);
         const output = summarize(s.name, s.output);
         return (
@@ -54,6 +58,16 @@ export function RunLog({ steps, running }: { steps: Step[]; running?: boolean })
                 {s.output === undefined && running && <span className="ml-2 font-normal text-mute">working…</span>}
               </div>
               {input && <div className="mt-1 font-mono text-[12px] break-all text-slate">{input}</div>}
+              {reason && (
+                <div className="mt-1 text-[13px] leading-snug text-slate [overflow-wrap:anywhere]">
+                  why: &ldquo;{reason}&rdquo;
+                  {hash && (
+                    <span className="ml-2 font-mono text-[11px] text-mute" title={`sha256 ${hash}, also written into the paypal record`}>
+                      sha256 {hash.slice(0, 12)}…
+                    </span>
+                  )}
+                </div>
+              )}
               {output && (
                 <div className={`mt-1 font-mono text-[12px] break-words ${refused ? "text-blue-ink" : "text-slate"}`}>
                   {output}

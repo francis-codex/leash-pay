@@ -17,8 +17,17 @@ agents that pay bills read invoices, emails and web pages. any of those can say 
    - the amount is at or under the per-payment max (default $20)
    - today's total stays under the daily cap (default $50), reserved atomically in redis
    - this exact payment (attempt + payee + amount) hasn't been paid already
+   - the owner hasn't hit the kill switch (checked first, before anything else)
    only then does it call **paypal payouts** (`POST /v1/payments/payouts`), with a deterministic `sender_batch_id` and `PayPal-Request-Id` so a retry can't pay twice.
 3. **the owner approves.** anything else the agent wants to pay becomes a **paypal order** (`POST /v2/checkout/orders`, intent `CAPTURE`). the owner opens `/approve/[id]`, reviews it, and approves on paypal.com with their own login. on return, our server checks the order (`GET /v2/checkout/orders/{id}`) and captures only if paypal says `APPROVED`.
+
+## every payment says why
+
+`pay` and `request_approval` both require a one-sentence `reason` from the agent. the reason shows in the run log, and its sha256 is written into paypal's own record: the payout `note` (`reason sha256:<hash>`) or the order `description` (`leash sha256:<first 16>`). anyone with the paypal record can re-hash the reason we show and check it matches. it's an audit trail of why the ai spent money, kept partly outside our database.
+
+## kill switch
+
+the owner page (`/approve`) has a kill switch. with the owner key (`LEASH_OWNER_KEY`, 16+ characters), the owner pauses all payments: the gate then refuses every `pay` and every `request_approval` with `Paused`, before any paypal call. resume with the same key. wrong-key tries are rate limited. no key set = the switch can't be flipped from the web.
 
 ## what is enforced where (honest version)
 
@@ -27,6 +36,8 @@ agents that pay bills read invoices, emails and web pages. any of those can say 
 | agent has no paypal credentials | architecture: the model only sees tools; credentials live in server env, used only by `paypal.ts` |
 | vendor allowlist, per-payment max, daily cap, no double pay | **our server** (`policy.ts` + redis). not paypal. if our server were compromised, these could be bypassed |
 | off-policy payments need the owner | **paypal**: the order can't be captured until the owner approves it in their paypal login |
+| kill switch | **our server** (`policy.ts`, a flag in redis). not paypal |
+| reason audit trail | the reason and its hash are stored by our server; the hash is also in paypal's payout note / order description, so it can be checked against paypal's copy |
 | idempotency | our redis claim plus paypal's `sender_batch_id` / `PayPal-Request-Id` |
 
 ## the four outcomes
@@ -44,7 +55,7 @@ every attempt is classified by code, not by the model:
 pnpm prove
 ```
 
-runs seven checks against the gate: a vendor gets paid, a retry is refused, an off-list payee is refused, an over-limit amount is refused, the daily cap holds, an off-policy payment becomes an order, and a second ask is refused. without `PAYPAL_CLIENT_ID` it uses a local fake; with it, it hits the paypal sandbox.
+runs eight checks against the gate: a vendor gets paid, a retry is refused, an off-list payee is refused, an over-limit amount is refused, the daily cap holds, an off-policy payment becomes an order, a second ask is refused, and when the owner pauses, both paying and asking are refused. without `PAYPAL_CLIENT_ID` it uses a local fake; with it, it hits the paypal sandbox.
 
 ## run it yourself
 
@@ -69,6 +80,7 @@ open `http://localhost:3000/arena` and write an invoice that tries to make it pa
 | `LEASH_APP_URL` | public url, used for paypal return/cancel links |
 | `AI_GATEWAY_API_KEY` or `ANTHROPIC_API_KEY` | the model |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | storage. unset = in-memory (dev only) |
+| `LEASH_OWNER_KEY` | owner key for the kill switch, 16+ characters. unset = switch locked |
 | `LEASH_MOCK_MODEL` | `1` = scripted model, dev only |
 
 ## stack

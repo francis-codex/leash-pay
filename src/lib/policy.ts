@@ -5,6 +5,7 @@ import { PayPalError, captureOrder, createOrder, createPayout, getOrder } from "
 import {
   claimOnce,
   getRecord,
+  isPaused,
   putRecord,
   releaseSpend,
   reserveSpend,
@@ -21,6 +22,7 @@ import {
  */
 
 export type DenyReason =
+  | "Paused"
   | "InvalidAmount"
   | "NotOnAllowlist"
   | "OverPerPaymentLimit"
@@ -30,6 +32,7 @@ export type DenyReason =
   | "AlreadyAsked";
 
 export const DENY_DETAIL: Record<DenyReason, string> = {
+  Paused: "the gate refused: the owner paused all payments",
   InvalidAmount: "the gate refused: that amount isn't a valid payment",
   NotOnAllowlist: "the gate refused: this payee is not on the owner's vendor list",
   OverPerPaymentLimit: `the gate refused: payments over $${MAX_PER_PAYMENT_USD} need the owner`,
@@ -38,6 +41,9 @@ export const DENY_DETAIL: Record<DenyReason, string> = {
   OverApprovalLimit: `the gate refused: amounts over $${MAX_APPROVAL_USD} can't even be requested`,
   AlreadyAsked: "the gate refused: the owner was already asked once for this invoice",
 };
+
+/** sha256 of the agent's stated reason. it goes into the paypal record, so paypal's copy can be checked against the reason we show. */
+export const reasonHash = (reason: string) => createHash("sha256").update(reason.trim()).digest("hex");
 
 export type GateResult =
   | { ok: true; status: "paid"; ref: string; batchId: string; paypalStatus: string }
@@ -56,7 +62,14 @@ export const paymentKey = (attemptId: string, to: string, usd: number) =>
 
 const batchIdFor = (key: string) => `leash-${createHash("sha256").update(key).digest("hex").slice(0, 32)}`;
 
-export async function gatePay(p: { attemptId: string; to: string; amountUsd: number; memo: string }): Promise<GateResult> {
+export async function gatePay(p: {
+  attemptId: string;
+  to: string;
+  amountUsd: number;
+  memo: string;
+  reason: string;
+}): Promise<GateResult> {
+  if (await isPaused()) return deny("Paused");
   if (!validAmount(p.amountUsd)) return deny("InvalidAmount");
   if (!isVendor(p.to)) return deny("NotOnAllowlist");
   if (p.amountUsd > MAX_PER_PAYMENT_USD) return deny("OverPerPaymentLimit");
@@ -72,8 +85,9 @@ export async function gatePay(p: { attemptId: string; to: string; amountUsd: num
 
   const batchId = batchIdFor(key);
   try {
-    const r = await createPayout({ batchId, email: p.to.trim(), amount: p.amountUsd, note: p.memo });
-    await putRecord(`payout:${batchId}`, { ...r, key, to: p.to, amountUsd: p.amountUsd, at: Date.now() });
+    const hash = reasonHash(p.reason);
+    const r = await createPayout({ batchId, email: p.to.trim(), amount: p.amountUsd, note: `${p.memo} | reason sha256:${hash}` });
+    await putRecord(`payout:${batchId}`, { ...r, key, to: p.to, amountUsd: p.amountUsd, reason: p.reason, reasonHash: hash, at: Date.now() });
     return { ok: true, status: "paid", ref: r.payoutBatchId, batchId, paypalStatus: r.status };
   } catch (e) {
     // A 4xx means paypal did not move money: give the budget back. On 5xx or a network
@@ -101,6 +115,7 @@ export async function gateRequestApproval(p: {
   amountUsd: number;
   reason: string;
 }): Promise<GateResult> {
+  if (await isPaused()) return deny("Paused");
   if (!validAmount(p.amountUsd)) return deny("InvalidAmount");
   if (p.amountUsd > MAX_APPROVAL_USD) return deny("OverApprovalLimit");
   if (!(await claimOnce(`ask:${p.attemptId}`))) return deny("AlreadyAsked");
@@ -112,6 +127,7 @@ export async function gateRequestApproval(p: {
     to: p.to.trim(),
     amountUsd: p.amountUsd,
     reason: p.reason,
+    reasonHash: reasonHash(p.reason),
     createdAt: Date.now(),
     status: "waiting_for_owner",
   };
@@ -120,7 +136,7 @@ export async function gateRequestApproval(p: {
       requestId: `leash-ask-${id}`,
       amount: p.amountUsd,
       payeeEmail: base.to,
-      description: `leash approval: ${p.reason}`,
+      description: `leash sha256:${base.reasonHash!.slice(0, 16)} ${p.reason}`,
       returnUrl: `${APP_URL}/approve/${id}?paypal=return`,
       cancelUrl: `${APP_URL}/approve/${id}?paypal=cancel`,
     });

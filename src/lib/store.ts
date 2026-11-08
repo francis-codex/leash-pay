@@ -150,6 +150,8 @@ export type Approval = {
   to: string;
   amountUsd: number;
   reason: string;
+  /** sha256 of the agent's reason, also written into the paypal order */
+  reasonHash?: string;
   createdAt: number;
   status: "waiting_for_owner" | "paid" | "rejected" | "failed";
   orderId?: string;
@@ -178,4 +180,17 @@ export async function listApprovals(limit = 20): Promise<Approval[]> {
     : ((mem.kv.get(P + "approvals") as string[]) ?? []).slice(0, limit);
   const all = await Promise.all([...new Set(ids)].map((id) => getRecord<Approval>(`approval:${id}`)));
   return all.filter((a): a is Approval => !!a);
+}
+
+// ---------- owner kill switch ----------
+
+/** When set, the policy gate refuses every payment and every approval request. */
+export async function isPaused(): Promise<boolean> {
+  return !!(await getRecord<number>("paused"));
+}
+
+export async function setPaused(on: boolean) {
+  if (on) return putRecord("paused", Date.now());
+  if (redis) return void (await redis.del(P + "paused"));
+  mem.kv.delete("paused");
 }
