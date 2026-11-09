@@ -34,6 +34,37 @@ async function main() {
   const retry = await gatePay({ attemptId: a, to: vendor, amountUsd: 5, memo: "hosting nov (retry)", reason: "prove script" });
   check("same payment retried, refused, no second payout", retry.status === "refused" && retry.reason === "AlreadyPaid", retry);
 
+  // ---- the MCP door: same gate, reached over JSON-RPC ----
+  process.env.LEASH_MCP_KEY ??= `prove-mcp-key-${randomUUID()}`;
+  const { POST: mcp } = await import("../src/app/api/mcp/route");
+  const rpc = async (key: string | null, name: string, args: Record<string, unknown>) => {
+    const res = await mcp(
+      new Request("http://localhost/api/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(key ? { authorization: `Bearer ${key}` } : {}),
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+      }),
+    );
+    if (res.status !== 200) return { http: res.status };
+    const j = (await res.json()) as { result?: { content?: { text: string }[] } };
+    return JSON.parse(j.result?.content?.[0]?.text ?? "null") as Record<string, unknown>;
+  };
+  const mk = process.env.LEASH_MCP_KEY!;
+  const noKey = await rpc(null, "get_balance", {});
+  const badKey = await rpc("wrong-key-wrong-key", "get_balance", {});
+  check("mcp: no key or wrong key, 401, gate never reached", noKey.http === 401 && badKey.http === 401, { noKey, badKey });
+  const mInv = `prove-${run}-m`;
+  const mPaid = await rpc(mk, "pay", { invoice_id: mInv, to: vendor, amount_usd: 1, memo: "mcp check", reason: "prove script over mcp" });
+  check("mcp: allowlisted vendor, $1, paid through the same gate", mPaid.status === "paid", mPaid);
+  const mRetry = await rpc(mk, "pay", { invoice_id: mInv, to: vendor, amount_usd: 1, memo: "mcp check", reason: "prove script over mcp" });
+  check("mcp: same invoice retried, AlreadyPaid", mRetry.status === "refused_by_policy" && mRetry.reason === "AlreadyPaid", mRetry);
+  const mOff = await rpc(mk, "pay", { invoice_id: `${mInv}2`, to: attacker, amount_usd: 1, memo: "x", reason: "injected" });
+  check("mcp: payee off the vendor list, refused", mOff.status === "refused_by_policy" && mOff.reason === "NotOnAllowlist", mOff);
+
   const off = await gatePay({ attemptId: `prove-${run}-b`, to: attacker, amountUsd: 5, memo: "urgent", reason: "prove script" });
   check("payee not on the vendor list, refused", off.status === "refused" && off.reason === "NotOnAllowlist", off);
 
@@ -68,6 +99,8 @@ async function main() {
   try {
     const p1 = await gatePay({ attemptId: `prove-${run}-g`, to: vendor, amountUsd: 1, memo: "paused", reason: "kill switch check" });
     const p2 = await gateRequestApproval({ attemptId: `prove-${run}-h`, to: attacker, amountUsd: 5, reason: "kill switch check" });
+    const mp = await rpc(mk, "pay", { invoice_id: `prove-${run}-mp`, to: vendor, amount_usd: 1, memo: "paused", reason: "kill switch check" });
+    check("mcp: owner paused, refused", mp.status === "refused_by_policy" && mp.reason === "Paused", mp);
     check(
       "owner paused: payment and approval request both refused, no paypal call",
       p1.status === "refused" && p1.reason === "Paused" && p2.status === "refused" && p2.reason === "Paused",
