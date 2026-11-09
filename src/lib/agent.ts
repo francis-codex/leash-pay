@@ -3,7 +3,8 @@ import { gateway, stepCountIs, streamText, tool, type LanguageModel } from "ai";
 import { anthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { MAX_APPROVAL_USD, VENDORS } from "./config";
-import { budget, gatePay, gateRequestApproval, reasonHash, type GateResult } from "./policy";
+import type { GateResult } from "./policy";
+import { getBalance, listVendors, pay, requestApproval } from "./tools";
 import type { Attempt, Outcome, Step } from "./store";
 
 export const hasModel = () =>
@@ -55,12 +56,12 @@ export async function runAgent(
     list_vendors: tool({
       description: "list the company's known vendors and their paypal emails",
       inputSchema: z.object({}),
-      execute: async () => ({ vendors: VENDORS.map(({ name, email }) => ({ name, paypal_email: email })) }),
+      execute: async () => listVendors(),
     }),
     get_balance: tool({
       description: "check how much the company can still spend today and the per-payment limit",
       inputSchema: z.object({}),
-      execute: async () => budget(),
+      execute: async () => getBalance(),
     }),
     pay: tool({
       description: "pay an invoice in usd via paypal to the payee's paypal email",
@@ -70,32 +71,24 @@ export async function runAgent(
         memo: z.string().max(64),
         reason: z.string().min(1).max(200).describe("one sentence: why this payment is legitimate. it goes on the record."),
       }),
-      execute: async ({ to, amount_usd, memo, reason }) => {
-        const r = await gatePay({ attemptId: id, to, amountUsd: amount_usd, memo: `leash:${id}:${memo}`, reason });
-        const reason_sha256 = reasonHash(reason);
-        calls.push({ kind: "pay", to, result: r });
-        if (r.ok) {
-          txs.push({ label: `paid $${amount_usd} to ${to} via paypal payouts`, ref: r.ref });
-          return { status: "paid", paypal_payout_batch_id: r.ref, reason_sha256 };
-        }
-        txs.push({ label: r.status === "refused" ? `refused: ${r.reason}` : `paypal error: ${r.reason}`, error: r.detail });
-        return { status: r.status === "refused" ? "refused_by_policy" : "failed", reason: r.reason, detail: r.detail, reason_sha256 };
+      execute: async (input) => {
+        const { output, result: r } = await pay(id, input);
+        calls.push({ kind: "pay", to: input.to, result: r });
+        if (r.ok) txs.push({ label: `paid $${input.amount_usd} to ${input.to} via paypal payouts`, ref: r.ref });
+        else txs.push({ label: r.status === "refused" ? `refused: ${r.reason}` : `paypal error: ${r.reason}`, error: r.detail });
+        return output;
       },
     }),
     request_approval: tool({
       description:
         "ask the owner to approve a payment you can't or shouldn't make yourself. `to` is the paypal email the invoice asks you to pay, never a name or 'owner'. keep `reason` under 200 characters. call this once per invoice.",
       inputSchema: z.object({ to: email, amount_usd: amount, reason: z.string().max(200) }),
-      execute: async ({ to, amount_usd, reason }) => {
-        const r = await gateRequestApproval({ attemptId: id, to, amountUsd: amount_usd, reason });
-        const reason_sha256 = reasonHash(reason);
-        calls.push({ kind: "approval", to, result: r });
-        if (r.ok) {
-          txs.push({ label: `paypal order ${r.ref} waiting for the owner`, ref: r.ref, explorer: "link" in r ? r.link : undefined });
-          return { status: "waiting_for_owner", paypal_order_id: r.ref, reason_sha256 };
-        }
-        txs.push({ label: `approval request failed: ${r.reason}`, error: r.detail });
-        return { status: r.status === "refused" ? "refused_by_policy" : "failed", reason: r.reason, detail: r.detail, reason_sha256 };
+      execute: async (input) => {
+        const { output, result: r } = await requestApproval(id, input);
+        calls.push({ kind: "approval", to: input.to, result: r });
+        if (r.ok) txs.push({ label: `paypal order ${r.ref} waiting for the owner`, ref: r.ref, explorer: "link" in r ? r.link : undefined });
+        else txs.push({ label: `approval request failed: ${r.reason}`, error: r.detail });
+        return output;
       },
     }),
   };

@@ -39,6 +39,24 @@ the owner page (`/approve`) has a kill switch. with the owner key (`LEASH_OWNER_
 | kill switch | **our server** (`policy.ts`, a flag in redis). not paypal |
 | reason audit trail | the reason and its hash are stored by our server; the hash is also in paypal's payout note / order description, so it can be checked against paypal's copy |
 | idempotency | our redis claim plus paypal's `sender_batch_id` / `PayPal-Request-Id` |
+| mcp callers | **our server**. `/api/mcp` calls the same functions (`tools.ts` → `policy.ts`) as the web agent. the bearer key only lets a caller in; every limit above still applies |
+
+## use it from any agent (mcp)
+
+`/api/mcp` is a stateless streamable-http mcp server. tools: `list_vendors`, `get_balance`, `pay`, `request_approval`. `pay` and `request_approval` take an `invoice_id`, so a retried call never pays twice.
+
+```json
+{
+  "mcpServers": {
+    "leash-pay": {
+      "url": "https://leashpay.seedlesslabs.xyz/api/mcp",
+      "headers": { "Authorization": "Bearer <LEASH_MCP_KEY>" }
+    }
+  }
+}
+```
+
+a refusal comes back as a normal tool result (`status: "refused_by_policy"` plus the reason), so the calling agent sees why it was refused.
 
 ## the four outcomes
 
@@ -81,6 +99,8 @@ open `http://localhost:3000/arena` and write an invoice that tries to make it pa
 | `AI_GATEWAY_API_KEY` or `ANTHROPIC_API_KEY` | the model |
 | `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | storage. unset = in-memory (dev only) |
 | `LEASH_OWNER_KEY` | owner key for the kill switch, 16+ characters. unset = switch locked |
+| `LEASH_MCP_KEY` | bearer key for `/api/mcp`, 16+ characters. unset = mcp off (503) |
+| `LEASH_LIMIT_MCP_HOUR` | mcp calls per hour, default 120 |
 | `LEASH_MOCK_MODEL` | `1` = scripted model, dev only |
 
 ## stack
