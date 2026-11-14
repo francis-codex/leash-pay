@@ -1,11 +1,12 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
-import { APP_URL, DAILY_CAP_USD, MAX_APPROVAL_USD, MAX_PER_PAYMENT_USD, isVendor } from "./config";
+import { APP_URL, DAILY_CAP_USD, MAX_APPROVAL_USD, MAX_OPEN_APPROVALS, MAX_PER_PAYMENT_USD, isVendor } from "./config";
 import { PayPalError, captureOrder, createOrder, createPayout, getOrder } from "./paypal";
 import {
   claimOnce,
   getRecord,
   isPaused,
+  listApprovals,
   putRecord,
   releaseSpend,
   reserveSpend,
@@ -29,7 +30,8 @@ export type DenyReason =
   | "DailyCapReached"
   | "AlreadyPaid"
   | "OverApprovalLimit"
-  | "AlreadyAsked";
+  | "AlreadyAsked"
+  | "TooManyOpen";
 
 export const DENY_DETAIL: Record<DenyReason, string> = {
   Paused: "the gate refused: the owner paused all payments",
@@ -40,6 +42,7 @@ export const DENY_DETAIL: Record<DenyReason, string> = {
   AlreadyPaid: "the gate refused: this exact payment was already made",
   OverApprovalLimit: `the gate refused: amounts over $${MAX_APPROVAL_USD} can't even be requested`,
   AlreadyAsked: "the gate refused: the owner was already asked once for this invoice",
+  TooManyOpen: `the gate refused: ${MAX_OPEN_APPROVALS} requests from this caller are already waiting for the owner`,
 };
 
 /** sha256 of the agent's stated reason. it goes into the paypal record, so paypal's copy can be checked against the reason we show. */
@@ -93,7 +96,7 @@ export async function gatePay(p: {
     // A 4xx means paypal did not move money: give the budget back. On 5xx or a network
     // error we keep it reserved, since the payout may have gone through; the batch id stays
     // claimed so a retry can't double-pay.
-    const definite = e instanceof PayPalError && e.status >= 400 && e.status < 500;
+    const definite = e instanceof PayPalError && ((e.status >= 400 && e.status < 500) || e.name === "PAYPAL_NOT_CONFIGURED");
     if (definite) await releaseSpend(cents);
     return {
       ok: false,
@@ -104,6 +107,11 @@ export async function gatePay(p: {
     };
   }
 }
+
+/** mcp:<invoice> -> "mcp", mcp:<name>:<invoice> -> "mcp:<name>", everything else is the web agent. */
+const callerOf = (attemptId: string) =>
+  attemptId.startsWith("mcp:") ? attemptId.slice(0, attemptId.lastIndexOf(":")) : "web";
+const OPEN_FOR_MS = 72 * 3600 * 1000; // an unanswered request stops counting after 3 days
 
 /**
  * Anything the gate won't pay becomes a paypal order. Only the owner can approve it,
@@ -118,6 +126,11 @@ export async function gateRequestApproval(p: {
   if (await isPaused()) return deny("Paused");
   if (!validAmount(p.amountUsd)) return deny("InvalidAmount");
   if (p.amountUsd > MAX_APPROVAL_USD) return deny("OverApprovalLimit");
+  const caller = callerOf(p.attemptId);
+  const open = (await listApprovals(200)).filter(
+    (a) => a.status === "waiting_for_owner" && callerOf(a.attemptId) === caller && Date.now() - a.createdAt < OPEN_FOR_MS,
+  );
+  if (open.length >= MAX_OPEN_APPROVALS) return deny("TooManyOpen");
   if (!(await claimOnce(`ask:${p.attemptId}`))) return deny("AlreadyAsked");
 
   const id = randomUUID();
@@ -161,6 +174,9 @@ export async function budget() {
 
 export const getPayoutRecord = (batchId: string) => getRecord(`payout:${batchId}`);
 
+const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const terminal = (e: unknown) => e instanceof PayPalError && e.status >= 400 && e.status < 500;
+
 /**
  * Settles an owner approval. Money only moves if paypal says the owner approved the
  * order in their own paypal login; calling this without that does nothing.
@@ -169,14 +185,23 @@ export async function settleApproval(id: string) {
   const a = await getRecord<Approval>(`approval:${id}`);
   if (!a) return { error: "not found" as const };
   if (a.status !== "waiting_for_owner" || !a.orderId) return { approval: a };
-  const o = await getOrder(a.orderId);
+  let o: { status: string };
+  try {
+    o = await getOrder(a.orderId);
+  } catch (e) {
+    if (terminal(e)) return { approval: await updateApproval(id, { status: "failed", error: msg(e) }) };
+    return { approval: await updateApproval(id, { error: `will retry: ${msg(e)}` }), paypalStatus: "UNREACHABLE" };
+  }
   if (o.status === "COMPLETED") return { approval: await updateApproval(id, { status: "paid" }) };
   if (o.status !== "APPROVED") return { approval: a, paypalStatus: o.status };
   try {
     const c = await captureOrder(a.orderId);
     return { approval: await updateApproval(id, c.status === "COMPLETED" ? { status: "paid", captureId: c.captureId } : {}) };
   } catch (e) {
-    return { approval: await updateApproval(id, { status: "failed", error: e instanceof Error ? e.message : String(e) }) };
+    // only a definite paypal "no" ends it. a timeout, a 5xx or a config gap leaves the request
+    // waiting, so the next settle (owner reloads the page, or POST /api/approve) tries again.
+    if (terminal(e)) return { approval: await updateApproval(id, { status: "failed", error: msg(e) }) };
+    return { approval: await updateApproval(id, { error: `will retry: ${msg(e)}` }), paypalStatus: "RETRY" };
   }
 }
 

@@ -6,9 +6,10 @@ import { randomUUID } from "node:crypto";
 const BASE =
   process.env.PAYPAL_ENV === "live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com";
 
-export function paypalMode(): "sandbox" | "live" | "fake" {
+/** "disabled" = production with no paypal credentials: status pages still load, money calls refuse. */
+export function paypalMode(): "sandbox" | "live" | "fake" | "disabled" {
   if (process.env.PAYPAL_CLIENT_ID) return process.env.PAYPAL_ENV === "live" ? "live" : "sandbox";
-  if (process.env.NODE_ENV === "production") throw new Error("PAYPAL_CLIENT_ID is not set");
+  if (process.env.NODE_ENV === "production") return "disabled";
   return "fake";
 }
 
@@ -26,6 +27,9 @@ export class PayPalError extends Error {
 let token: { value: string; exp: number } | undefined;
 
 async function accessToken(): Promise<string> {
+  if (paypalMode() === "disabled") {
+    throw new PayPalError(503, "PAYPAL_NOT_CONFIGURED", "paypal is off: PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are not set");
+  }
   if (token && token.exp > Date.now() + 60_000) return token.value;
   const basic = Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString("base64");
   const res = await fetch(`${BASE}/v1/oauth2/token`, {
